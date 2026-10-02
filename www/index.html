@@ -255,8 +255,20 @@ function lines(){
     return{ss:strokes.filter(s=>set.has(s)),mean:L.mean,head};
   });
 }
+const NATIVE=window.Capacitor&&Capacitor.isNativePlatform&&Capacitor.isNativePlatform()&&Capacitor.Plugins&&Capacitor.Plugins.InkRecognizer;
+let pending=false;
+async function prepNative(){
+  if(!NATIVE)return;
+  try{const r=await NATIVE.isReady();
+    if(!r.ready){toast('Downloading offline reader (one time)...');await NATIVE.download();toast('Offline reader ready');}}
+  catch(e){}
+}
 async function recog(ss){
   let t=0;
+  if(NATIVE){
+    const ink0=ss.map(s=>[s.p.map(p=>Math.round(p[0])),s.p.map(p=>Math.round(p[1])),s.p.map(()=>(t+=15))]);
+    const r=await NATIVE.recognize({ink:ink0});return (r.text||'').trim();
+  }
   const ink=ss.map(s=>[s.p.map(p=>Math.round(p[0])),s.p.map(p=>Math.round(p[1])),s.p.map(()=>(t+=15))]);
   const body={options:'enable_pre_space',requests:[{writing_guide:{writing_area_width:LW,writing_area_height:LW},ink,language:'en'}]};
   const r=await fetch('https://www.google.com.tw/inputtools/request?ime=handwriting&app=mobilesearch&cs=1&oe=UTF-8',
@@ -354,15 +366,20 @@ async function convert(){
   toast('Reading your writing...');
   const batch=strokes.filter(s=>!s.e&&!s.d);
   try{
-    const md=localStorage.getItem('fn_key')?await aiConvert():await localConvert();
+    const md=(localStorage.getItem('fn_key')&&navigator.onLine)?await aiConvert():await localConvert();
+    pending=false;
     if(md){const old=$('typed').value.trim();setText(old?old+'\n'+md:md);
       batch.forEach(s=>{s.d=1;});redraw();toast('Added to your note');}
     else toast('Could not read it');
-  }catch(e){toast(e.message&&e.message!=='Failed to fetch'?e.message:'Needs internet - check connection');}
+  }catch(e){const net=!navigator.onLine||/fetch|network|load failed/i.test(e.message||'');
+    if(net){pending=true;toast('No internet - your writing is kept and will convert when it returns');}
+    else toast(e.message||'Could not read it');}
 }
 $('conv').onclick=convert;
 
+addEventListener('online',()=>{if(pending)convert();});
 addEventListener('resize',resize);
+prepNative();
 resize();
 </script>
 </body>
