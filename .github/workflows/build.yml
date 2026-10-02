@@ -11,6 +11,76 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - run: npm install
       - run: npx cap add android
+      - name: Add offline handwriting reader (ML Kit)
+        run: |
+          D=android/app/src/main/java/com/tayo/fingernotes
+          cat > $D/InkPlugin.java <<'EOF'
+          package com.tayo.fingernotes;
+          import com.getcapacitor.*;
+          import com.getcapacitor.annotation.CapacitorPlugin;
+          import com.google.mlkit.common.model.DownloadConditions;
+          import com.google.mlkit.common.model.RemoteModelManager;
+          import com.google.mlkit.vision.digitalink.*;
+          import org.json.JSONArray;
+
+          @CapacitorPlugin(name = "InkRecognizer")
+          public class InkPlugin extends Plugin {
+            private DigitalInkRecognitionModel model() throws Exception {
+              return DigitalInkRecognitionModel.builder(DigitalInkRecognitionModelIdentifier.fromLanguageTag("en-US")).build();
+            }
+            @PluginMethod public void isReady(PluginCall call) {
+              try {
+                RemoteModelManager.getInstance().isModelDownloaded(model())
+                  .addOnSuccessListener(ok -> { JSObject r = new JSObject(); r.put("ready", ok); call.resolve(r); })
+                  .addOnFailureListener(e -> call.reject(String.valueOf(e.getMessage())));
+              } catch (Exception e) { call.reject(String.valueOf(e.getMessage())); }
+            }
+            @PluginMethod public void download(PluginCall call) {
+              try {
+                RemoteModelManager.getInstance().download(model(), new DownloadConditions.Builder().build())
+                  .addOnSuccessListener(v -> call.resolve())
+                  .addOnFailureListener(e -> call.reject(String.valueOf(e.getMessage())));
+              } catch (Exception e) { call.reject(String.valueOf(e.getMessage())); }
+            }
+            @PluginMethod public void recognize(PluginCall call) {
+              try {
+                final DigitalInkRecognitionModel m = model();
+                RemoteModelManager.getInstance().isModelDownloaded(m).addOnSuccessListener(ok -> {
+                  if (!ok) { call.reject("Offline reader not downloaded yet - open the app once with internet"); return; }
+                  try {
+                    JSONArray strokes = call.getArray("ink");
+                    Ink.Builder ib = Ink.builder();
+                    for (int i = 0; i < strokes.length(); i++) {
+                      JSONArray s = strokes.getJSONArray(i);
+                      JSONArray xs = s.getJSONArray(0), ys = s.getJSONArray(1), ts = s.getJSONArray(2);
+                      Ink.Stroke.Builder sb = Ink.Stroke.builder();
+                      for (int k = 0; k < xs.length(); k++)
+                        sb.addPoint(Ink.Point.create((float) xs.getDouble(k), (float) ys.getDouble(k), ts.getLong(k)));
+                      ib.addStroke(sb.build());
+                    }
+                    DigitalInkRecognizer rec = DigitalInkRecognition.getClient(DigitalInkRecognizerOptions.builder(m).build());
+                    rec.recognize(ib.build())
+                      .addOnSuccessListener(res -> { JSObject r = new JSObject();
+                        r.put("text", res.getCandidates().isEmpty() ? "" : res.getCandidates().get(0).getText()); call.resolve(r); })
+                      .addOnFailureListener(e -> call.reject(String.valueOf(e.getMessage())));
+                  } catch (Exception e) { call.reject(String.valueOf(e.getMessage())); }
+                }).addOnFailureListener(e -> call.reject(String.valueOf(e.getMessage())));
+              } catch (Exception e) { call.reject(String.valueOf(e.getMessage())); }
+            }
+          }
+
+          EOF
+          cat > $D/MainActivity.java <<'EOF'
+          package com.tayo.fingernotes;
+          import android.os.Bundle;
+          import com.getcapacitor.BridgeActivity;
+          public class MainActivity extends BridgeActivity {
+            @Override public void onCreate(Bundle b) { registerPlugin(InkPlugin.class); super.onCreate(b); }
+          }
+
+          EOF
+          awk '{print} /^dependencies \{/{print "    implementation \"com.google.mlkit:digital-ink-recognition:18.1.0\""}' android/app/build.gradle > /tmp/b.gradle
+          mv /tmp/b.gradle android/app/build.gradle
       - run: npx cap sync android
       - run: cd android && ./gradlew assembleDebug
       - uses: actions/upload-artifact@v4
